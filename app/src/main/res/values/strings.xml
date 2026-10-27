@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WiFiADB</string>
+    <string name="channel_name">ADB 服务</string>
+    <string name="channel_desc">维持 adb tcp 端口与访问白名单</string>
+</resources>

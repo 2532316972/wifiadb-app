@@ -1,0 +1,12 @@
+﻿# Gradle / 构建产物
+.gradle/
+build/
+app/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# 根目录调试截图（非仓库资产）
+/*.png
