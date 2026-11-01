@@ -115,7 +115,7 @@ class AdbService : Service() {
         _state.value = _state.value.copy(running = true, lastError = null)
 
         // 1) 确保 adb tcp 开着
-        val status = manager.readStatus()
+        var status = manager.readStatus()
         if (!status.hasRoot) {
             _state.value = _state.value.copy(
                 running = false,
@@ -128,19 +128,18 @@ class AdbService : Service() {
             manager.setEnabled(true).onFailure { e ->
                 _state.value = _state.value.copy(lastError = e.message)
             }
+            // setEnabled 重启了 adbd，网卡探测结果（tun 接口）可能已随路由变化。
+            // 不重读的话，这轮用的还是旧的 tailscaleInterface，要等下一轮才追上。
+            status = manager.readStatus()
         }
 
         // 2) 建规则（带快路径判断）
         val tailscaleIf = status.tailscaleInterface
-        val plannedV4 = RulePlanner.planAccepts(config.allowSources, tailscaleIf, "iptables")
-        val plannedV6 = RulePlanner.planAccepts(config.allowSources, tailscaleIf, "ip6tables")
-        val needApply = force || !RulePlanner.rulesMatch(
-            v4Rules = status.v4Rules,
-            v6Rules = status.v6Rules,
-            expectedV4Accepts = plannedV4.size,
-            expectedV6Accepts = plannedV6.size,
-            port = config.port,
-        )
+        val expectedV4 = RulePlanner.expectedSpecs(config.allowSources, tailscaleIf, "iptables", config.port)
+        val expectedV6 = RulePlanner.expectedSpecs(config.allowSources, tailscaleIf, "ip6tables", config.port)
+        val needApply = force ||
+            !RulePlanner.rulesMatch(status.v4Rules, expectedV4) ||
+            !RulePlanner.rulesMatch(status.v6Rules, expectedV6)
 
         if (needApply) {
             manager.applyRules(tailscaleIf)

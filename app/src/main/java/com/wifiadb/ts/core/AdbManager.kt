@@ -1,7 +1,6 @@
 package com.wifiadb.ts.core
 
 import com.wifiadb.ts.data.AdbConfig
-import com.wifiadb.ts.data.AllowSource
 import com.wifiadb.ts.data.RootShell
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -188,13 +187,9 @@ class AdbManager(private val config: AdbConfig) {
                 )
                 var position = 1
                 for (source in effective) {
-                    // TAILSCALE 与 INTERFACE 都按 -i 匹配，只是网卡名来源不同
-                    val iface = when (source.kind) {
-                        AllowSource.Kind.TAILSCALE -> tailscaleInterface
-                        AllowSource.Kind.INTERFACE -> source.value
-                        AllowSource.Kind.SOURCE_IP -> null
-                    }
-                    val spec = iface?.let { "-i $it" } ?: "-s ${source.value}"
+                    // 规格统一由 RulePlanner.acceptSpec 构造：巡检的「规则已符合」
+                    // 判断比对的是同一份规格，两边各写一份迟早漂移。
+                    val spec = RulePlanner.acceptSpec(source, tailscaleInterface, port)
 
                     val insert = RootShell.execute(
                         "$table -I INPUT $position $spec -p tcp --dport $port -j ACCEPT"
@@ -207,9 +202,9 @@ class AdbManager(private val config: AdbConfig) {
                     }
                 }
 
-                // 3) DROP 兜底放在最后
+                // 3) DROP 兜底放在最后（规格同样来自 RulePlanner）
                 val drop = RootShell.execute(
-                    "$table -I INPUT $position -p tcp --dport $port -j DROP"
+                    "$table -I INPUT $position ${RulePlanner.dropSpec(port)}"
                 )
                 if (drop.isSuccess) {
                     logs += "[$table] 其余来源丢弃"

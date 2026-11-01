@@ -1,8 +1,6 @@
 package com.wifiadb.ts.core
 
-import com.wifiadb.ts.data.AdbConfig
 import com.wifiadb.ts.data.AllowSource
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 
 /**
  * 纯逻辑：算出「这一轮应该插哪些 ACCEPT」。
@@ -42,34 +40,96 @@ object RulePlanner {
     }
 
     /**
+     * 单条 ACCEPT 规则的完整规格。[AdbManager.applyRules] 插入与 [expectedSpecs]
+     * 比对共用这一处构造——巡检判断「符不符合」用的和实际插进去的必须是同一份规格，
+     * 否则会出现「巡检认为已符合、实际插的又不一样」的漂移。
+     */
+    fun acceptSpec(source: AllowSource, tailscaleInterface: String?, port: Int): String {
+        val iface = when (source.kind) {
+            AllowSource.Kind.TAILSCALE -> tailscaleInterface
+            AllowSource.Kind.INTERFACE -> source.value
+            AllowSource.Kind.SOURCE_IP -> null
+        }
+        val match = iface?.let { "-i $it" } ?: "-s ${source.value}"
+        return "$match -p tcp --dport $port -j ACCEPT"
+    }
+
+    /** DROP 兜底规格，恒为该表最后一条。 */
+    fun dropSpec(port: Int): String = "-p tcp --dport $port -j DROP"
+
+    /**
+     * 一张表里「应该存在的全部规则规格」：ACCEPT 按配置顺序 + 末尾 DROP。
+     *
+     * 巡检拿它和设备上的实际规则逐条比对。比对的是规则语义而非条数——
+     * 网卡改名（实测同机出现过 tun0 与 tun1）这类「条数没变、内容变了」的情况，
+     * 数条数的判据会误判为「已符合」而不重建，旧 `-i` 规则就成了死规则。
+     */
+    fun expectedSpecs(
+        allowSources: List<AllowSource>,
+        tailscaleInterface: String?,
+        table: String,
+        port: Int,
+    ): List<String> =
+        planAccepts(allowSources, tailscaleInterface, table)
+            .map { acceptSpec(it, tailscaleInterface, port) } + dropSpec(port)
+
+    /**
      * 判断现有规则是否已符合预期，用于避免无谓的重建。
      *
-     * 判据 = 两张表里该端口的规则数都等于「预期 ACCEPT 数 + 1 个 DROP」。
-     * 这个判据是粗粒度的（不比对每条规则的具体内容），但足以覆盖三种实际会发生的情况：
-     * 规则堆积、被 netd 清掉、Tailscale 断开后多出失效的 -i 规则。
+     * 旧判据只数「含 --dport 的条数 == 期望数」，网卡改名时 3 条 == 3 条误判通过。
+     * 现在把每条规则解析成「匹配方式>动作」的签名再做多重集合比对：
+     * `-m tcp` 回显噪音、`-s x.x.x.x/32` 的 /32 后缀都归一化掉，
+     * 签名解析不出（结构怪异的规则）一律判不匹配——认不准就重建，宁滥勿缺。
+     *
+     * @param actualRules `iptables -S INPUT | grep --dport` 的原文（`-A INPUT ...` 行）
+     * @param expectedSpecs [expectedSpecs] 的输出
      */
-    @OptIn(ExperimentalCoroutinesApi::class)
     fun rulesMatch(
-        v4Rules: List<String>,
-        v6Rules: List<String>,
-        expectedV4Accepts: Int,
-        expectedV6Accepts: Int,
-        port: Int,
+        actualRules: List<String>,
+        expectedSpecs: List<String>,
     ): Boolean {
-        fun countPort(rules: List<String>) =
-            rules.count { it.contains("--dport $port") }
+        fun sigs(specs: List<String>): List<String>? {
+            val out = ArrayList<String>(specs.size)
+            for (spec in specs) {
+                val sig = signature(spec) ?: return null
+                out += sig
+            }
+            return out
+        }
 
-        val v4Count = countPort(v4Rules)
-        val v6Count = countPort(v6Rules)
-        val v4Expected = expectedV4Accepts + 1 // +1 = DROP
-        val v6Expected = expectedV6Accepts + 1
+        // 只认 -A INPUT 行：grep 已按 --dport 过滤，本端口的规则必然以此开头
+        val actual = actualRules
+            .filter { it.startsWith("-A INPUT ") }
+            .map { it.removePrefix("-A INPUT ") }
+        val actualSigs = sigs(actual) ?: return false
+        val expectedSigs = sigs(expectedSpecs) ?: return false
 
-        // 一条规则都没有 = 完全没加固，不符合
-        if (v4Count == 0 && v6Count == 0) return false
+        // 多重集合比对（sorted 而非 toSet）：重复堆积的规则也算差异，不被去重掩盖
+        return actualSigs.sorted() == expectedSigs.sorted()
+    }
 
-        // 任何一张表条数不对就要重建。
-        // 注意 v6 表可能因为「白名单里只有 IP 条目」而预期 0 条 ACCEPT + 1 条 DROP = 1 条，
-        // 此时 v6 那条 DROP 仍然要存在（否则 v6 进来的连接无人拦截）。
-        return v4Count == v4Expected && v6Count == v6Expected
+    /**
+     * 规则签名：`-i tun1 -p tcp --dport 5555 -j ACCEPT` → `i:tun1>ACCEPT`。
+     *
+     * 只保留匹配方式（-i / -s / 都没有 = any）与 -j 动作；-p、-m、--dport
+     * 在本端口规则里全部相同，不参与区分。`-s` 的 /32 是 iptables 回显自动补的
+     * （用户输入裸 IP、插进去再 -S 出来就带 /32），剥掉以对齐期望规格。
+     * 没有 -j 或结构残缺返回 null（调用方判不匹配）。
+     */
+    private fun signature(spec: String): String? {
+        val tokens = spec.trim().split(Regex("\\s+"))
+        if (tokens.size < 2) return null
+        var match = "any"
+        var i = 0
+        while (i < tokens.size - 1) {
+            when (tokens[i]) {
+                "-i" -> match = "i:${tokens[i + 1]}"
+                "-s" -> match = "s:${tokens[i + 1].removeSuffix("/32")}"
+            }
+            i++
+        }
+        val j = tokens.indexOf("-j")
+        if (j < 0 || j + 1 >= tokens.size) return null
+        return "$match>${tokens[j + 1]}"
     }
 }

@@ -134,6 +134,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         refresh()
         detectLegacy()
+        ensurePatrolService()
+    }
+
+    /**
+     * 打开 app 时若配置为开启态，把巡检服务拉起来。
+     *
+     * 服务可能因为重装、被系统杀掉、START_STICKY 重启失败等原因不在跑，
+     * 而除了 setEnabled 切换之外没有任何入口会启动它——那样「自动巡检」
+     * 就只在「刚点开开关的那一次」活着，之后全靠运气。每次打开 app 兜一次底。
+     * startForegroundService 对已在跑的服务只是再投一次 onStartCommand，幂等无害。
+     */
+    private fun ensurePatrolService() {
+        viewModelScope.launch {
+            if (config.value.enabled) {
+                runCatching { AdbService.start(app) }
+            }
+        }
     }
 
     fun refresh() {
