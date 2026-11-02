@@ -80,4 +80,18 @@ class RulePlannerTest {
         val expected = RulePlanner.expectedSpecs(ipOnly, "tun1", "ip6tables", 5555)
         assertEquals(listOf("-p tcp --dport 5555 -j DROP"), expected)
     }
+
+    @Test
+    fun `插入命令里规格只出现一次且与巡检比对的一致`() {
+        // 事故现场：applyRules 在 acceptSpec 已完整的规格后又拼了一遍尾缀，命令变成
+        // `... -j ACCEPT -p tcp --dport 5555 -j ACCEPT`，iptables 报错，ACCEPT 一条都没插上，
+        // 只剩 DROP，白名单设备全被挡在外面。
+        val ip = AllowSource(AllowSource.Kind.SOURCE_IP, "192.168.0.110")
+        val cmd = RulePlanner.insertCommand("iptables", 1, ip, null, 5555)
+        assertEquals(1, Regex("--dport").findAll(cmd).count())
+        assertEquals(1, Regex("-j ").findAll(cmd).count())
+
+        val spec = cmd.removePrefix("iptables -I INPUT 1 ")
+        assertEquals(RulePlanner.expectedSpecs(listOf(ip), null, "iptables", 5555).first(), spec)
+    }
 }

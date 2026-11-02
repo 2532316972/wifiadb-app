@@ -187,12 +187,12 @@ class AdbManager(private val config: AdbConfig) {
                 )
                 var position = 1
                 for (source in effective) {
-                    // 规格统一由 RulePlanner.acceptSpec 构造：巡检的「规则已符合」
-                    // 判断比对的是同一份规格，两边各写一份迟早漂移。
+                    // 规格统一由 RulePlanner 构造：巡检的「规则已符合」判断比对的是
+                    // 同一份规格，两边各写一份迟早漂移。命令也由它拼，别在这里再追加尾缀。
                     val spec = RulePlanner.acceptSpec(source, tailscaleInterface, port)
 
                     val insert = RootShell.execute(
-                        "$table -I INPUT $position $spec -p tcp --dport $port -j ACCEPT"
+                        RulePlanner.insertCommand(table, position, source, tailscaleInterface, port)
                     )
                     if (insert.isSuccess) {
                         logs += "[$table] 放行 $spec"

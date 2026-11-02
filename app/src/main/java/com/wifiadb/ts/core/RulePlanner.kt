@@ -58,6 +58,21 @@ object RulePlanner {
     fun dropSpec(port: Int): String = "-p tcp --dport $port -j DROP"
 
     /**
+     * 实际交给 root shell 的插入命令。
+     *
+     * 规格只允许在 [acceptSpec] 里拼一次。曾经这里在 acceptSpec 的完整规格后面
+     * 又拼了一遍 `-p tcp --dport <port> -j ACCEPT`，命令成了「两个 -j」，
+     * iptables 直接报错 → 只剩 DROP → 白名单里的设备全被挡在外面。
+     */
+    fun insertCommand(
+        table: String,
+        position: Int,
+        source: AllowSource,
+        tailscaleInterface: String?,
+        port: Int,
+    ): String = "$table -I INPUT $position ${acceptSpec(source, tailscaleInterface, port)}"
+
+    /**
      * 一张表里「应该存在的全部规则规格」：ACCEPT 按配置顺序 + 末尾 DROP。
      *
      * 巡检拿它和设备上的实际规则逐条比对。比对的是规则语义而非条数——
